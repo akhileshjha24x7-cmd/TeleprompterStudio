@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:audio_waveforms/audio_waveforms.dart' as wave;
+import 'package:cross_file/cross_file.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
@@ -261,6 +265,43 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     });
   }
 
+
+  Future<void> _shareTake(AudioTake take) async {
+    if (!await File(take.path).exists()) return;
+    await SharePlus.instance.share(ShareParams(title: take.name, files: [XFile(take.path)]));
+  }
+
+  Future<void> _editTake(AudioTake take) async {
+    final selection = await showDialog<(int, int)>(
+      context: context,
+      builder: (_) => _AudioEditorDialog(path: take.path, title: take.name),
+    );
+    if (selection == null) return;
+    final startMs = selection.$1;
+    final endMs = selection.$2;
+    if (endMs <= startMs) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final output = dir.path + '/trimmed_' + DateTime.now().microsecondsSinceEpoch.toString() + '.m4a';
+    final start = (startMs / 1000).toStringAsFixed(3);
+    final duration = ((endMs - startMs) / 1000).toStringAsFixed(3);
+    setState(() => _status = 'Trimming selected audio…');
+    try {
+      final command = "-ss " + start + " -i '" + take.path + "' -t " + duration + " -vn -c:a aac -b:a 128k '" + output + "'";
+      final session = await FFmpegKit.execute(command);
+      final code = await session.getReturnCode();
+      if (!ReturnCode.isSuccess(code) || !await File(output).exists()) {
+        throw Exception((await session.getOutput()) ?? 'Could not trim audio.');
+      }
+      if (!mounted) return;
+      setState(() {
+        _takes.add(AudioTake(path: output, createdAt: DateTime.now()));
+        _status = 'Trimmed audio saved as a new take. Original is unchanged.';
+      });
+    } catch (e) {
+      if (mounted) setState(() => _status = 'Trim failed: $e');
+    }
+  }
+
   Future<void> _exportAllTakesAsMp3() async {
     if (_takes.isEmpty || _exporting) return;
     setState(() {
@@ -286,7 +327,16 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       final returnCode = await session.getReturnCode();
       if (ReturnCode.isSuccess(returnCode) && await outputFile.exists()) {
         if (!mounted) return;
-        setState(() => _status = 'MP3 exported successfully: ${outputFile.path}');
+        final bytes = await outputFile.readAsBytes();
+        final savedUri = await FilePicker.saveFile(
+          dialogTitle: 'Save merged audio',
+          fileName: 'teleprompter_export_' + stamp.toString() + '.mp3',
+          bytes: bytes,
+        );
+        if (!mounted) return;
+        setState(() => _status = savedUri == null
+            ? 'Export cancelled. MP3 remains available in app storage.'
+            : 'MP3 saved to your selected location.');
       } else {
         final details = (await session.getOutput()) ?? '';
         throw Exception(details.isEmpty ? 'Audio conversion failed.' : details);
@@ -551,6 +601,16 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
                         icon: const Icon(Icons.arrow_downward, size: 19),
                       ),
                       IconButton(
+                        tooltip: 'Open waveform editor and trim',
+                        onPressed: () => _editTake(take),
+                        icon: const Icon(Icons.graphic_eq),
+                      ),
+                      IconButton(
+                        tooltip: 'Share audio',
+                        onPressed: () => _shareTake(take),
+                        icon: const Icon(Icons.share),
+                      ),
+                      IconButton(
                         tooltip: 'Play / stop',
                         onPressed: () => _playTake(take),
                         icon: Icon(_playingPath == take.path ? Icons.stop_circle : Icons.play_circle_fill),
@@ -569,7 +629,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
               child: Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Audio-only recording is available; the camera is never opened. Use Play Silently to advance the script on screen with its seeker only; no sound is played and no audio is recorded. The line-by-line list is hidden until you press Show line-by-line list. Recordings are saved as separate M4A takes and can be merged into one MP3. Waveform trimming and video recording are not included yet.',
+                  'Audio-only recording is available; the camera is never opened. Use Play Silently to advance the script on screen with its seeker only; no sound is played and no audio is recorded. The line-by-line list is hidden until you press Show line-by-line list. Recordings are saved as separate M4A takes and can be merged into one MP3. Each take has a waveform editor, trim option, playback and WhatsApp/other-app sharing. Merged MP3 export lets you choose a save location. Original takes remain unchanged when you trim.',
                   style: TextStyle(height: 1.4),
                 ),
               ),
@@ -577,6 +637,150 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+
+class _AudioEditorDialog extends StatefulWidget {
+  const _AudioEditorDialog({required this.path, required this.title});
+  final String path;
+  final String title;
+  @override
+  State<_AudioEditorDialog> createState() => _AudioEditorDialogState();
+}
+
+class _AudioEditorDialogState extends State<_AudioEditorDialog> {
+  late final wave.PlayerController _controller;
+  StreamSubscription<int>? _durationSub;
+  StreamSubscription<wave.PlayerState>? _stateSub;
+  int _durationMs = 0;
+  int _playheadMs = 0;
+  double _startMs = 0;
+  double _endMs = 0;
+  bool _ready = false;
+  bool _playing = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = wave.PlayerController();
+    _durationSub = _controller.onCurrentDurationChanged.listen((v) {
+      if (mounted) setState(() => _playheadMs = v);
+    });
+    _stateSub = _controller.onPlayerStateChanged.listen((v) {
+      if (mounted) setState(() => _playing = v.isPlaying);
+    });
+    _prepare();
+  }
+
+  Future<void> _prepare() async {
+    try {
+      await _controller.preparePlayer(path: widget.path, shouldExtractWaveform: true, noOfSamples: 160);
+      if (!mounted) return;
+      setState(() {
+        _durationMs = _controller.maxDuration > 0 ? _controller.maxDuration : 1;
+        _endMs = _durationMs.toDouble();
+        _ready = true;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Waveform could not be loaded: $e');
+    }
+  }
+
+  Future<void> _togglePlay() async {
+    if (!_ready) return;
+    if (_playing) {
+      await _controller.pausePlayer();
+    } else {
+      if (_playheadMs >= _endMs || _playheadMs < _startMs) {
+        await _controller.seekTo(_startMs.round());
+      }
+      await _controller.startPlayer();
+    }
+  }
+
+  String _time(double ms) {
+    final seconds = (ms / 1000).floor();
+    return (seconds ~/ 60).toString().padLeft(2, '0') + ':' + (seconds % 60).toString().padLeft(2, '0');
+  }
+
+  @override
+  void dispose() {
+    _durationSub?.cancel();
+    _stateSub?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final max = _durationMs > 0 ? _durationMs.toDouble() : 1.0;
+    final safeStart = _startMs.clamp(0.0, max - 1);
+    final safeEnd = _endMs.clamp(safeStart + 1, max);
+    return AlertDialog(
+      title: Text('Waveform editor — ' + widget.title),
+      content: SizedBox(
+        width: 520,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
+          if (!_ready && _error == null) const Padding(
+            padding: EdgeInsets.all(20), child: CircularProgressIndicator()),
+          if (_ready) ...[
+            Container(
+              height: 110,
+              decoration: BoxDecoration(color: const Color(0xFF171B24), borderRadius: BorderRadius.circular(12)),
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: wave.AudioFileWaveforms(
+                size: Size(MediaQuery.of(context).size.width * 0.72, 90),
+                playerController: _controller,
+                waveformType: wave.WaveformType.fitWidth,
+                enableSeekGesture: true,
+                playerWaveStyle: const wave.PlayerWaveStyle(
+                  fixedWaveColor: Colors.white38,
+                  liveWaveColor: Colors.orangeAccent,
+                  seekLineColor: Colors.white,
+                  showSeekLine: true,
+                  spacing: 3,
+                  waveThickness: 2,
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('Playhead: ' + _time(_playheadMs.toDouble())),
+              Text('Total: ' + _time(max)),
+              IconButton(onPressed: _togglePlay,
+                icon: Icon(_playing ? Icons.pause_circle : Icons.play_circle), iconSize: 34),
+            ]),
+            const Align(alignment: Alignment.centerLeft,
+              child: Text('Select the portion to keep', style: TextStyle(fontWeight: FontWeight.bold))),
+            RangeSlider(
+              min: 0, max: max,
+              divisions: max > 1 ? max.floor().clamp(1, 1000) : 1,
+              values: RangeValues(safeStart, safeEnd),
+              labels: RangeLabels(_time(safeStart), _time(safeEnd)),
+              onChanged: (v) => setState(() { _startMs = v.start; _endMs = v.end; }),
+            ),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('Start ' + _time(safeStart)), Text('End ' + _time(safeEnd)),
+            ]),
+            const SizedBox(height: 6),
+            const Text('Trim creates a new audio take. Your original recording is kept.',
+              style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: _ready && safeEnd > safeStart
+            ? () => Navigator.pop(context, (safeStart.round(), safeEnd.round()))
+            : null,
+          child: const Text('Save trimmed take'),
+        ),
+      ],
     );
   }
 }
