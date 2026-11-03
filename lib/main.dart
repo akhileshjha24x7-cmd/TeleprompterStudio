@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -243,7 +244,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
         if (!mounted) return;
         setState(() => _status = 'MP3 exported successfully: ${outputFile.path}');
       } else {
-        final details = await session.getOutput();
+        final details = (await session.getOutput()) ?? '';
         throw Exception(details.isEmpty ? 'Audio conversion failed.' : details);
       }
       if (await listFile.exists()) await listFile.delete();
