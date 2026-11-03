@@ -810,20 +810,24 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
       }
     });
     _durationSub = _player.onDurationChanged.listen((duration) {
-      if (!mounted || _ready || duration == null) return;
+      if (!mounted || _ready) return;
       final ms = duration.inMilliseconds;
-      if (ms > 500) setState(() {
-        _durationMs = ms;
-        _selection = const RangeValues(0, 1);
-        _ready = true;
-        _error = null;
-      });
+      if (ms > 500) {
+        setState(() {
+          _durationMs = ms;
+          _selection = const RangeValues(0, 1);
+          _ready = true;
+          _error = null;
+        });
+      }
     });
     _completeSub = _player.onPlayerComplete.listen((_) {
-      if (mounted) setState(() {
-        _playing = false;
-        _previewingSelection = false;
-      });
+      if (mounted) {
+        setState(() {
+          _playing = false;
+          _previewingSelection = false;
+        });
+      }
     });
     _prepare();
   }
@@ -848,14 +852,15 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
         _error = _ready ? null : 'Audio file could not be loaded.';
       });
     } catch (e) {
-      if (mounted) setState(() => _error = 'Could not open audio: ' + e.toString());
+      if (mounted) {
+        setState(() => _error = 'Could not open audio: $e');
+      }
     }
   }
 
   String _time(int ms) {
     final seconds = (ms / 1000).floor();
-    return (seconds ~/ 60).toString().padLeft(2, '0') + ':' +
-        (seconds % 60).toString().padLeft(2, '0');
+    return '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
   }
 
   Future<void> _playSelection() async {
@@ -870,11 +875,13 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
       });
       await _player.resume();
     } catch (e) {
-      if (mounted) setState(() {
-        _playing = false;
-        _previewingSelection = false;
-        _error = 'Preview could not start: ' + e.toString();
-      });
+      if (mounted) {
+        setState(() {
+          _playing = false;
+          _previewingSelection = false;
+          _error = 'Preview could not start: $e';
+        });
+      }
     }
   }
 
@@ -883,23 +890,29 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
     try {
       if (_playing) {
         await _player.pause();
-        if (mounted) setState(() {
-          _playing = false;
-          _previewingSelection = false;
-        });
+        if (mounted) {
+          setState(() {
+            _playing = false;
+            _previewingSelection = false;
+          });
+        }
       } else {
         if (_positionMs >= _durationMs || _positionMs < _startMs || _positionMs >= _endMs) {
           await _player.seek(Duration(milliseconds: _startMs));
           if (mounted) setState(() => _positionMs = _startMs);
         }
         await _player.resume();
-        if (mounted) setState(() {
-          _playing = true;
-          _previewingSelection = true;
-        });
+        if (mounted) {
+          setState(() {
+            _playing = true;
+            _previewingSelection = true;
+          });
+        }
       }
     } catch (e) {
-      if (mounted) setState(() => _error = 'Playback failed: ${e}');
+      if (mounted) {
+        setState(() => _error = 'Playback failed: $e');
+      }
     }
   }
 
