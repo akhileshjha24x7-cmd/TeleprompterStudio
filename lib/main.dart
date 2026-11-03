@@ -776,6 +776,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   late final AudioPlayer _player;
   late final wave.PlayerController _waveController;
   StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<void>? _completeSub;
   int _durationMs = 0;
   int _positionMs = 0;
@@ -806,6 +807,16 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
       } else {
         setState(() => _positionMs = ms);
       }
+    });
+    _durationSub = _player.onDurationChanged.listen((duration) {
+      if (!mounted || _ready || duration == null) return;
+      final ms = duration.inMilliseconds;
+      if (ms > 500) setState(() {
+        _durationMs = ms;
+        _selection = const RangeValues(0, 1);
+        _ready = true;
+        _error = null;
+      });
     });
     _completeSub = _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() {
@@ -915,6 +926,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   @override
   void dispose() {
     _positionSub?.cancel();
+    _durationSub?.cancel();
     _completeSub?.cancel();
     _player.dispose();
     _waveController.dispose();
