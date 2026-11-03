@@ -40,11 +40,11 @@ jobs:
         run: flutter analyze
 
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --split-per-abi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: teleprompterstudio-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: teleprompterstudio-split-apks
+          path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
