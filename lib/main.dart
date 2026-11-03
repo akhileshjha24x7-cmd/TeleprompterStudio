@@ -667,6 +667,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
     super.initState();
     _controller = wave.PlayerController();
     _durationSub = _controller.onCurrentDurationChanged.listen((v) {
+      if (_playing && v >= _endMs) unawaited(_controller.pausePlayer());
       if (mounted) setState(() => _playheadMs = v);
     });
     _stateSub = _controller.onPlayerStateChanged.listen((v) {
@@ -717,8 +718,8 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final max = _durationMs > 0 ? _durationMs.toDouble() : 1.0;
-    final safeStart = _startMs.clamp(0.0, max - 1);
-    final safeEnd = _endMs.clamp(safeStart + 1, max);
+    final safeStart = _startMs.clamp(0.0, max - 1).toDouble();
+    final safeEnd = _endMs.clamp(safeStart + 1, max).toDouble();
     return AlertDialog(
       title: Text('Waveform editor — ' + widget.title),
       content: SizedBox(
@@ -758,7 +759,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
               child: Text('Select the portion to keep', style: TextStyle(fontWeight: FontWeight.bold))),
             RangeSlider(
               min: 0, max: max,
-              divisions: max > 1 ? max.floor().clamp(1, 1000) : 1,
+              divisions: max > 1 ? max.floor().clamp(1, 1000).toInt() : 1,
               values: RangeValues(safeStart, safeEnd),
               labels: RangeLabels(_time(safeStart), _time(safeEnd)),
               onChanged: (v) => setState(() { _startMs = v.start; _endMs = v.end; }),
