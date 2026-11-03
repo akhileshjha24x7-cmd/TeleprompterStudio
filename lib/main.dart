@@ -184,6 +184,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     if (path != null && await File(path).exists()) {
       setState(() {
         _takes.add(AudioTake(path: path, createdAt: DateTime.now()));
+        _mergedMp3Path = null;
         _status = 'Audio segment saved.';
       });
     }
@@ -313,54 +314,50 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       builder: (_) => _AudioEditorDialog(path: take.path, title: take.name),
     );
     if (edit == null) return;
-    final source = take.path;
-    final durationMs = edit.durationMs;
-    final dir = await getApplicationDocumentsDirectory();
+
+    final source = File(take.path);
+    final directory = source.parent;
     final stamp = DateTime.now().microsecondsSinceEpoch;
-    final outputs = <String>[];
-    Future<void> makeClip(int fromMs, int toMs, String suffix) async {
-      if (toMs <= fromMs) return;
-      final output = dir.path + '/edit_' + stamp.toString() + '_' + suffix + '.m4a';
-      final startSec = (fromMs / 1000).toStringAsFixed(3);
-      final lengthSec = ((toMs - fromMs) / 1000).toStringAsFixed(3);
-      final command = "-ss " + startSec + " -i '" + source + "' -t " + lengthSec + " -vn -c:a aac -b:a 128k '" + output + "'";
+    final outputPath = directory.path + '/edit_temp_' + stamp.toString() + '.m4a';
+    final backupPath = directory.path + '/edit_backup_' + stamp.toString() + '.m4a';
+    final startSeconds = (edit.startMs / 1000).toStringAsFixed(3);
+    final durationSeconds = ((edit.endMs - edit.startMs) / 1000).toStringAsFixed(3);
+    final command = "-ss " + startSeconds + " -i '" + source.path +
+        "' -t " + durationSeconds + " -vn -c:a aac -b:a 128k '" + outputPath + "'";
+
+    try {
+      if (mounted) setState(() => _status = 'Applying edit to ' + take.name + '…');
       final session = await FFmpegKit.execute(command);
       final code = await session.getReturnCode();
-      if (!ReturnCode.isSuccess(code) || !await File(output).exists()) {
-        throw Exception((await session.getOutput()) ?? 'Audio edit failed.');
+      final output = File(outputPath);
+      if (!ReturnCode.isSuccess(code) || !await output.exists() || await output.length() == 0) {
+        throw Exception((await session.getOutput()) ?? 'Could not create edited audio.');
       }
-      outputs.add(output);
-    }
-    try {
-      setState(() => _status = 'Saving audio edit…');
-      final point = edit.playheadMs.clamp(1, durationMs - 1).toInt();
-      if (edit.action == 'split') {
-        await makeClip(0, point, 'part_1');
-        await makeClip(point, durationMs, 'part_2');
-        if (outputs.length != 2) throw Exception('Could not create both split parts.');
+
+      // Swap files using a backup. The take list and its order never change.
+      await source.rename(backupPath);
+      try {
+        await output.rename(source.path);
+        await File(backupPath).delete();
+      } catch (_) {
+        if (await source.exists()) await source.delete();
+        await File(backupPath).rename(source.path);
+        rethrow;
+      }
+      if (mounted) {
         setState(() {
-          _takes.add(AudioTake(path: outputs[0], createdAt: DateTime.now()));
-          _takes.add(AudioTake(path: outputs[1], createdAt: DateTime.now()));
-          _status = 'Take split into two parts. Both parts added below.';
+          _mergedMp3Path = null;
+          _status = take.name + ' updated in place. No new take was added.';
         });
-      } else {
-        if (edit.action == 'trim_left') {
-          await makeClip(point, durationMs, 'trimmed');
-        } else {
-          await makeClip(0, point, 'trimmed');
-        }
-        if (outputs.isEmpty) throw Exception('The selected edit produced no audio.');
-        final editedBytes = await File(outputs.first).readAsBytes();
-        await File(source).writeAsBytes(editedBytes, flush: true);
-        await File(outputs.first).delete();
-        if (mounted) setState(() => _status = 'Edit saved to the same take. No extra take was created.');
       }
     } catch (e) {
-      for (final path in outputs) {
-        final file = File(path);
-        if (await file.exists()) await file.delete();
+      final temp = File(outputPath);
+      if (await temp.exists()) await temp.delete();
+      final backup = File(backupPath);
+      if (await backup.exists() && !await source.exists()) {
+        await backup.rename(source.path);
       }
-      if (mounted) setState(() => _status = 'Audio edit failed: $e');
+      if (mounted) setState(() => _status = 'Edit failed; original take was kept. ' + e.toString());
     }
   }
 
@@ -453,6 +450,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     if (!mounted) return;
     setState(() {
       _takes.remove(take);
+      _mergedMp3Path = null;
       _status = 'Audio segment deleted.';
     });
   }
@@ -659,65 +657,95 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
               Text('${_takes.length} segment(s)', style: const TextStyle(color: Colors.black54)),
             ]),
             const SizedBox(height: 4),
-            const Text('Each pause or stop saves the current audio take. Play or delete individual takes below.',
+            const Text('Har Take ko Play, Edit ya Delete karein. Drag handle pakadkar order badlein; export isi order mein hoga.',
                 style: TextStyle(color: Colors.black54)),
             const SizedBox(height: 8),
             if (_takes.isEmpty)
               const Card(child: Padding(padding: EdgeInsets.all(18), child: Text('No recordings yet. Press Start + Record.')))
             else
-              ..._takes.asMap().entries.map((entry) {
-                final i = entry.key;
-                final take = entry.value;
-                return Card(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: CircleAvatar(child: Text((i + 1).toString())),
-                        title: Text(take.name),
-                        subtitle: Text(take.path.split(Platform.pathSeparator).last,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
+              ReorderableListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                buildDefaultDragHandles: false,
+                itemCount: _takes.length,
+                onReorder: (oldIndex, newIndex) {
+                  setState(() {
+                    if (newIndex > oldIndex) newIndex -= 1;
+                    final item = _takes.removeAt(oldIndex);
+                    _takes.insert(newIndex, item);
+                    _mergedMp3Path = null;
+                    _status = 'Order updated. Export will follow this order.';
+                  });
+                },
+                itemBuilder: (context, index) {
+                  final take = _takes[index];
+                  final isPlaying = _playingPath == take.path;
+                  return Card(
+                    key: ValueKey(take.path),
+                    margin: const EdgeInsets.symmetric(vertical: 5),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 17,
+                            backgroundColor: const Color(0xFFB71C1C),
+                            foregroundColor: Colors.white,
+                            child: Text((index + 1).toString()),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(take.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 3),
+                                Text('Drag handle se order badlein', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                                const SizedBox(height: 7),
+                                Wrap(
+                                  spacing: 4,
+                                  runSpacing: 2,
+                                  children: [
+                                    TextButton.icon(
+                                      onPressed: () => _playTake(take),
+                                      icon: Icon(isPlaying ? Icons.stop : Icons.play_arrow, size: 18),
+                                      label: Text(isPlaying ? 'Stop' : 'Play'),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () => _editTake(take),
+                                      icon: const Icon(Icons.tune, size: 18),
+                                      label: const Text('Edit'),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () => _deleteTake(take),
+                                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                                      icon: const Icon(Icons.delete_outline, size: 18),
+                                      label: const Text('Delete'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          ReorderableDragStartListener(
+                            index: index,
+                            child: const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: Icon(Icons.drag_handle, size: 28, color: Colors.black54),
+                            ),
+                          ),
+                        ],
                       ),
-                      Wrap(spacing: 6, runSpacing: 4, children: [
-                        OutlinedButton.icon(
-                          onPressed: () => _playTake(take),
-                          icon: Icon(_playingPath == take.path ? Icons.stop : Icons.play_arrow),
-                          label: Text(_playingPath == take.path ? 'Stop' : 'Play')),
-                        OutlinedButton.icon(
-                          onPressed: () => _editTake(take),
-                          icon: const Icon(Icons.graphic_eq), label: const Text('Edit waveform')),
-                        OutlinedButton.icon(
-                          onPressed: () => _shareTake(take),
-                          icon: const Icon(Icons.share), label: const Text('Share')),
-                        OutlinedButton.icon(
-                          onPressed: () => _saveTakeToLocation(take),
-                          icon: const Icon(Icons.save_alt), label: const Text('Save as')),
-                        OutlinedButton.icon(
-                          onPressed: i == 0 ? null : () => setState(() {
-                            final item = _takes.removeAt(i); _takes.insert(i - 1, item);
-                          }),
-                          icon: const Icon(Icons.arrow_upward), label: const Text('Move up')),
-                        OutlinedButton.icon(
-                          onPressed: i == _takes.length - 1 ? null : () => setState(() {
-                            final item = _takes.removeAt(i); _takes.insert(i + 1, item);
-                          }),
-                          icon: const Icon(Icons.arrow_downward), label: const Text('Move down')),
-                        OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
-                          onPressed: () => _deleteTake(take),
-                          icon: const Icon(Icons.delete_outline), label: const Text('Delete')),
-                      ]),
-                    ]),
-                  ),
-                );
-              }),
+                    ),
+                  );
+                },
+              ),
             const SizedBox(height: 12),
             const Card(
               child: Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Audio-only recording is available; the camera is never opened. Use Play Silently to advance the script on screen with its seeker only; no sound is played and no audio is recorded. The line-by-line list is hidden until you press Show line-by-line list. Recordings are saved as separate M4A takes and can be merged into one MP3. Each take has a waveform editor, trim option, playback and WhatsApp/other-app sharing. Merged MP3 export lets you choose a save location. Original takes remain unchanged when you trim.',
+                  'Audio-only recording is available; the camera is never opened. Use Play Silently for text-only playback. Edit changes the selected Take in place; drag Takes into the order you want, then export and share one MP3.',
                   style: TextStyle(height: 1.4),
                 ),
               ),
@@ -731,10 +759,9 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
 
 
 class _AudioEditCommand {
-  const _AudioEditCommand({required this.action, required this.playheadMs, required this.durationMs});
-  final String action;
-  final int playheadMs;
-  final int durationMs;
+  const _AudioEditCommand({required this.startMs, required this.endMs});
+  final int startMs;
+  final int endMs;
 }
 
 class _AudioEditorDialog extends StatefulWidget {
@@ -746,51 +773,44 @@ class _AudioEditorDialog extends StatefulWidget {
 }
 
 class _AudioEditorDialogState extends State<_AudioEditorDialog> {
-  late final AudioPlayer _previewPlayer;
+  late final AudioPlayer _player;
   late final wave.PlayerController _waveController;
   StreamSubscription<Duration>? _positionSub;
-  StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<void>? _completeSub;
   int _durationMs = 0;
-  int _markerMs = 0;
-  int _previewEndMs = 0;
-  String _mode = 'trim_left';
+  int _positionMs = 0;
+  RangeValues _selection = const RangeValues(0, 1);
   bool _ready = false;
   bool _playing = false;
-  bool _previewingEdit = false;
+  bool _previewingSelection = false;
   String? _error;
+
+  int get _startMs => (_selection.start * _durationMs).round();
+  int get _endMs => (_selection.end * _durationMs).round();
 
   @override
   void initState() {
     super.initState();
-    _previewPlayer = AudioPlayer();
+    _player = AudioPlayer();
     _waveController = wave.PlayerController();
-    _positionSub = _previewPlayer.onPositionChanged.listen((position) {
+    _positionSub = _player.onPositionChanged.listen((position) {
       if (!mounted) return;
       final ms = position.inMilliseconds.clamp(0, _durationMs).toInt();
-      if (_previewingEdit && ms >= _previewEndMs) {
-        _previewPlayer.pause();
+      if (_previewingSelection && ms >= _endMs) {
+        _player.pause();
         setState(() {
-          _markerMs = _previewEndMs;
+          _positionMs = _endMs;
           _playing = false;
-          _previewingEdit = false;
+          _previewingSelection = false;
         });
       } else {
-        setState(() => _markerMs = ms);
+        setState(() => _positionMs = ms);
       }
     });
-    _durationSub = _previewPlayer.onDurationChanged.listen((duration) {
-      if (mounted && _durationMs == 0) {
-        setState(() {
-          _durationMs = duration.inMilliseconds;
-          _ready = _durationMs > 1;
-        });
-      }
-    });
-    _completeSub = _previewPlayer.onPlayerComplete.listen((_) {
+    _completeSub = _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() {
         _playing = false;
-        _previewingEdit = false;
+        _previewingSelection = false;
       });
     });
     _prepare();
@@ -798,23 +818,25 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
 
   Future<void> _prepare() async {
     try {
-      await _previewPlayer.setSource(DeviceFileSource(widget.path));
+      await _player.setSource(DeviceFileSource(widget.path));
+      final duration = await _player.getDuration();
       try {
-        await _waveController.preparePlayer(path: widget.path, shouldExtractWaveform: true, noOfSamples: 160);
-      } catch (_) {
-        // The timeline slider remains available if waveform extraction fails.
-      }
-      final duration = await _previewPlayer.getDuration();
+        await _waveController.preparePlayer(
+          path: widget.path,
+          shouldExtractWaveform: true,
+          noOfSamples: 180,
+        );
+      } catch (_) {}
       if (!mounted) return;
       final ms = duration?.inMilliseconds ?? 0;
       setState(() {
         _durationMs = ms;
-        _markerMs = 0;
-        _ready = ms > 1;
-        _error = _ready ? null : 'Could not read this audio duration.';
+        _selection = const RangeValues(0, 1);
+        _ready = ms > 500;
+        _error = _ready ? null : 'Audio file could not be loaded.';
       });
     } catch (e) {
-      if (mounted) setState(() => _error = 'Could not open audio: $e');
+      if (mounted) setState(() => _error = 'Could not open audio: ' + e.toString());
     }
   }
 
@@ -824,94 +846,84 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
         (seconds % 60).toString().padLeft(2, '0');
   }
 
-  int get _rangeStart => _mode == 'trim_left' ? _markerMs : 0;
-  int get _rangeEnd => _mode == 'trim_right' ? _markerMs : _durationMs;
-
-  Future<void> _preview() async {
-    if (!_ready) return;
+  Future<void> _playSelection() async {
+    if (!_ready || _endMs - _startMs < 500) return;
     try {
-      await _previewPlayer.stop();
-      final start = _rangeStart;
-      final end = _rangeEnd;
-      if (end <= start) return;
-      await _previewPlayer.seek(Duration(milliseconds: start));
+      await _player.stop();
+      await _player.seek(Duration(milliseconds: _startMs));
       setState(() {
-        _markerMs = start;
-        _previewEndMs = end;
-        _previewingEdit = true;
+        _positionMs = _startMs;
         _playing = true;
+        _previewingSelection = true;
       });
-      await _previewPlayer.resume();
+      await _player.resume();
     } catch (e) {
       if (mounted) setState(() {
         _playing = false;
-        _previewingEdit = false;
-        _error = 'Preview failed: $e';
+        _previewingSelection = false;
+        _error = 'Preview could not start: ' + e.toString();
       });
     }
   }
 
-  Future<void> _togglePlayback() async {
+  Future<void> _togglePlay() async {
     if (!_ready) return;
-    if (_playing) {
-      await _previewPlayer.pause();
-      if (mounted) setState(() {
-        _playing = false;
-        _previewingEdit = false;
-      });
-    } else {
-      if (_markerMs >= _durationMs) {
-        await _previewPlayer.seek(Duration.zero);
-        if (mounted) setState(() => _markerMs = 0);
+    try {
+      if (_playing) {
+        await _player.pause();
+        if (mounted) setState(() {
+          _playing = false;
+          _previewingSelection = false;
+        });
+      } else {
+        if (_positionMs >= _durationMs || _positionMs < _startMs || _positionMs >= _endMs) {
+          await _player.seek(Duration(milliseconds: _startMs));
+          if (mounted) setState(() => _positionMs = _startMs);
+        }
+        await _player.resume();
+        if (mounted) setState(() {
+          _playing = true;
+          _previewingSelection = true;
+        });
       }
-      await _previewPlayer.resume();
-      if (mounted) setState(() {
-        _playing = true;
-        _previewingEdit = false;
-      });
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Playback failed: ' + e.toString());
     }
   }
 
-  Future<void> _seek(int value) async {
+  Future<void> _seekTo(int ms) async {
     if (!_ready) return;
-    await _previewPlayer.pause();
-    await _previewPlayer.seek(Duration(milliseconds: value));
+    await _player.pause();
+    await _player.seek(Duration(milliseconds: ms));
     if (mounted) setState(() {
-      _markerMs = value;
+      _positionMs = ms;
       _playing = false;
-      _previewingEdit = false;
+      _previewingSelection = false;
     });
   }
 
   Future<void> _save() async {
-    if (!_ready || _durationMs < 2) return;
-    if (_mode != 'split' && (_rangeEnd - _rangeStart) < 500) {
-      setState(() => _error = 'Keep at least half a second of audio.');
+    if (!_ready || _endMs - _startMs < 500) {
+      setState(() => _error = 'Select at least half a second to keep.');
       return;
     }
-    await _previewPlayer.stop();
+    await _player.stop();
     if (!mounted) return;
-    Navigator.pop(context, _AudioEditCommand(
-      action: _mode,
-      playheadMs: _markerMs.clamp(1, _durationMs - 1).toInt(),
-      durationMs: _durationMs,
-    ));
+    Navigator.pop(context, _AudioEditCommand(startMs: _startMs, endMs: _endMs));
   }
 
   @override
   void dispose() {
     _positionSub?.cancel();
-    _durationSub?.cancel();
     _completeSub?.cancel();
-    _previewPlayer.dispose();
+    _player.dispose();
     _waveController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final start = _rangeStart;
-    final end = _rangeEnd;
+    final width = MediaQuery.of(context).size.width - 64;
     return AlertDialog(
       title: Text('Edit ' + widget.title),
       content: SizedBox(
@@ -921,36 +933,33 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('1. Choose what you want to do', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'trim_left', label: Text('Keep after')),
-                  ButtonSegment(value: 'trim_right', label: Text('Keep before')),
-                  ButtonSegment(value: 'split', label: Text('Split')),
-                ],
-                selected: {_mode},
-                onSelectionChanged: _ready ? (value) => setState(() => _mode = value.first) : null,
+              const Text(
+                'Select the part you want to KEEP. Drag both ends of the selection.',
+                style: TextStyle(fontWeight: FontWeight.w600),
               ),
-              const SizedBox(height: 18),
-              const Text('2. Move the marker on the timeline', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
+              const SizedBox(height: 14),
               Container(
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: const Color(0xFF171B24), borderRadius: BorderRadius.circular(12)),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF171B24),
+                  borderRadius: BorderRadius.circular(12),
+                ),
                 child: Column(
                   children: [
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                      const Text('AUDIO TIMELINE', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
-                      Text(_time(_durationMs), style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                    ]),
-                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('WAVEFORM', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                        Text(_time(_durationMs), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
                     if (_ready)
                       SizedBox(
-                        height: 76,
-                        width: MediaQuery.of(context).size.width * 0.72,
+                        height: 84,
+                        width: width,
                         child: wave.AudioFileWaveforms(
-                          size: Size(MediaQuery.of(context).size.width * 0.72, 76),
+                          size: Size(width, 84),
                           playerController: _waveController,
                           waveformType: wave.WaveformType.fitWidth,
                           enableSeekGesture: false,
@@ -962,74 +971,78 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
                             waveThickness: 2,
                           ),
                         ),
-                      ),
-                    if (_ready)
-                      Slider(
-                        min: 0,
-                        max: _durationMs.toDouble(),
-                        value: _markerMs.clamp(0, _durationMs).toDouble(),
-                        onChanged: (value) => setState(() => _markerMs = value.round()),
-                        onChangeEnd: (value) => _seek(value.round()),
-                        activeColor: Colors.amber,
-                        inactiveColor: Colors.white24,
                       )
                     else
                       const LinearProgressIndicator(),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                      Text(_time(_markerMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
-                      Text('Total ' + _time(_durationMs), style: const TextStyle(color: Colors.white70)),
-                    ]),
-                    const SizedBox(height: 6),
-                    Container(
-                      height: 8,
-                      decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(8)),
-                      child: Row(children: [
-                        if (start > 0) Expanded(flex: start, child: const SizedBox()),
-                        if (end > start) Expanded(flex: end - start, child: Container(
-                          decoration: BoxDecoration(color: Colors.amber, borderRadius: BorderRadius.circular(8)))),
-                        if (_durationMs > end) Expanded(flex: _durationMs - end, child: const SizedBox()),
-                      ]),
+                    const SizedBox(height: 4),
+                    if (_ready)
+                      RangeSlider(
+                        min: 0,
+                        max: 1,
+                        divisions: 200,
+                        values: _selection,
+                        labels: RangeLabels(_time(_startMs), _time(_endMs)),
+                        onChanged: (values) {
+                          setState(() {
+                            _selection = values;
+                            _positionMs = _startMs;
+                            _playing = false;
+                            _previewingSelection = false;
+                          });
+                        },
+                        activeColor: Colors.amber,
+                        inactiveColor: Colors.white24,
+                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('IN  ' + _time(_startMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                        Text('OUT  ' + _time(_endMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton.tonalIcon(
-                      onPressed: _ready ? _togglePlayback : null,
-                      icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
-                      label: Text(_playing ? 'Pause preview' : 'Play audio'),
+                    const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton.filledTonal(
+                          onPressed: _ready ? _togglePlay : null,
+                          icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                          tooltip: _playing ? 'Pause' : 'Play selection',
+                        ),
+                        const SizedBox(width: 8),
+                        Text(_time(_positionMs) + ' / ' + _time(_durationMs),
+                          style: const TextStyle(color: Colors.white70, fontFeatures: [FontFeature.tabularFigures()])),
+                      ],
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 12),
-              Text(
-                _mode == 'trim_left'
-                    ? 'Selected: ' + _time(start) + ' to ' + _time(end) + ' — audio before the marker will be removed.'
-                    : _mode == 'trim_right'
-                        ? 'Selected: ' + _time(start) + ' to ' + _time(end) + ' — audio after the marker will be removed.'
-                        : 'The marker divides this take into two parts.',
-                style: const TextStyle(fontSize: 12, color: Colors.black54),
-              ),
-              const SizedBox(height: 12),
               OutlinedButton.icon(
-                onPressed: _ready ? _preview : null,
+                onPressed: _ready ? _playSelection : null,
                 icon: const Icon(Icons.hearing),
-                label: const Text('Preview only the edited part'),
+                label: const Text('Preview selected part'),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Save Edit will replace this Take in its current position. It will NOT add another Take. You can still reorder it later.',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 8),
                 Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
               ],
-              const SizedBox(height: 6),
-              const Text(
-                'Save Edit replaces this same take. It will not create a duplicate. Split is the only option that creates two parts.',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-              ),
             ],
           ),
         ),
       ),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        FilledButton.icon(onPressed: _ready ? _save : null, icon: const Icon(Icons.save), label: const Text('Save Edit')),
+        FilledButton.icon(
+          onPressed: _ready ? _save : null,
+          icon: const Icon(Icons.save),
+          label: const Text('Save Edit'),
+        ),
       ],
     );
   }
