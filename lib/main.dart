@@ -480,6 +480,22 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
                     subtitle: Text(take.path.split(Platform.pathSeparator).last, maxLines: 1, overflow: TextOverflow.ellipsis),
                     trailing: Wrap(spacing: 0, children: [
                       IconButton(
+                        tooltip: 'Move take up',
+                        onPressed: i == 0 ? null : () => setState(() {
+                          final item = _takes.removeAt(i);
+                          _takes.insert(i - 1, item);
+                        }),
+                        icon: const Icon(Icons.arrow_upward, size: 19),
+                      ),
+                      IconButton(
+                        tooltip: 'Move take down',
+                        onPressed: i == _takes.length - 1 ? null : () => setState(() {
+                          final item = _takes.removeAt(i);
+                          _takes.insert(i + 1, item);
+                        }),
+                        icon: const Icon(Icons.arrow_downward, size: 19),
+                      ),
+                      IconButton(
                         tooltip: 'Play / stop',
                         onPressed: () => _playTake(take),
                         icon: Icon(_playingPath == take.path ? Icons.stop_circle : Icons.play_circle_fill),
