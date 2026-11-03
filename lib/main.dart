@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:auto_size_text/auto_size_text.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -60,6 +61,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   bool _running = false;
   bool _recording = false;
   bool _hasStarted = false;
+  bool _exporting = false;
   String? _playingPath;
   String _status = 'Paste your script to begin.';
 
@@ -212,6 +214,44 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       _hasStarted = false;
       _status = 'Session stopped. Your audio segments are below.';
     });
+  }
+
+  Future<void> _exportAllTakesAsMp3() async {
+    if (_takes.isEmpty || _exporting) return;
+    setState(() {
+      _exporting = true;
+      _status = 'Combining audio segments and exporting MP3…';
+    });
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final listFile = File('${dir.path}/audio_concat_$stamp.txt');
+      final outputFile = File('${dir.path}/teleprompter_export_$stamp.mp3');
+      final listContent = _takes
+          .where((take) => File(take.path).existsSync())
+          .map((take) => "file '${take.path}'")
+          .join('\n');
+      if (listContent.trim().isEmpty) {
+        throw Exception('No saved audio files were found.');
+      }
+      await listFile.writeAsString('$listContent\n');
+      final command =
+          "-f concat -safe 0 -i '${listFile.path}' -vn -ac 2 -ar 44100 -codec:a libmp3lame -q:a 2 '${outputFile.path}'";
+      final session = await FFmpegKit.execute(command);
+      final returnCode = await session.getReturnCode();
+      if (ReturnCode.isSuccess(returnCode) && await outputFile.exists()) {
+        if (!mounted) return;
+        setState(() => _status = 'MP3 exported successfully: ${outputFile.path}');
+      } else {
+        final details = await session.getOutput();
+        throw Exception(details.isEmpty ? 'Audio conversion failed.' : details);
+      }
+      if (await listFile.exists()) await listFile.delete();
+    } catch (e) {
+      if (mounted) setState(() => _status = 'MP3 export failed: $e');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
   }
 
   Future<void> _playTake(AudioTake take) async {
@@ -408,6 +448,17 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
             const SizedBox(height: 8),
             Text(_status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
             const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _takes.isEmpty || _exporting ? null : _exportAllTakesAsMp3,
+                icon: _exporting
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.library_music),
+                label: Text(_exporting ? 'Exporting MP3…' : 'Merge all takes and Export MP3'),
+              ),
+            ),
+            const SizedBox(height: 18),
             Row(children: [
               const Expanded(child: Text('2. Audio timeline', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
               Text('${_takes.length} segment(s)', style: const TextStyle(color: Colors.black54)),
@@ -447,7 +498,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
               child: Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Audio-only recording is active; the camera is never opened. Script lines now auto-fit the prompter area and each line has its own live progress seeker. Recordings are saved as separate M4A takes. MP3 merging/export, waveform trimming, and video recording are not included yet.',
+                  'Audio-only recording is active; the camera is never opened. Script lines now auto-fit the prompter area and each line has its own live progress seeker. Recordings are saved as separate M4A takes, and the Merge all takes button exports them together as one MP3. Waveform trimming and video recording are not included yet.',
                   style: TextStyle(height: 1.4),
                 ),
               ),
