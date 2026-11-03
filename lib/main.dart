@@ -1011,7 +1011,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
                         ),
                         const SizedBox(width: 8),
                         Text(_time(_positionMs) + ' / ' + _time(_durationMs),
-                          style: const TextStyle(color: Colors.white70, fontFeatures: [FontFeature.tabularFigures()])),
+                          style: const TextStyle(color: Colors.white70)),
                       ],
                     ),
                   ],
