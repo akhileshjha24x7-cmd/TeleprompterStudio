@@ -21,26 +21,17 @@ jobs:
       - name: Generate Android platform files
         run: flutter create . --platforms=android
 
-      - name: Repair and install Android NDK
+      - name: Use stable Android NDK version
         shell: bash
         run: |
           set -e
+          # Use NDK 27 instead of 28.2, whose archive failed to unpack on the runner.
+          sed -i 's/ndkVersion = flutter.ndkVersion/ndkVersion = "27.0.12077973"/' android/app/build.gradle.kts
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          NDK_DIR="$ANDROID_HOME/ndk/28.2.13676358"
-          # Remove any incomplete/corrupt download left by an earlier SDK setup.
-          rm -rf "$NDK_DIR" "$ANDROID_HOME/.temp/"*
-          for attempt in 1 2 3; do
-            echo "Installing NDK 28.2.13676358 (attempt $attempt/3)"
-            if yes | "$SDKMANAGER" --install "ndk;28.2.13676358"; then
-              break
-            fi
-            rm -rf "$NDK_DIR" "$ANDROID_HOME/.temp/"*
-            if [ "$attempt" -eq 3 ]; then
-              echo "NDK installation failed after 3 attempts."
-              exit 1
-            fi
-            sleep 10
-          done
+          # Accept Android SDK licenses separately; ignore the harmless yes/Broken-pipe status.
+          yes | "$SDKMANAGER" --licenses || true
+          rm -rf "$ANDROID_HOME/ndk/27.0.12077973" "$ANDROID_HOME/.temp/"*
+          "$SDKMANAGER" --install "ndk;27.0.12077973"
 
       - name: Get packages
         run: flutter pub get
