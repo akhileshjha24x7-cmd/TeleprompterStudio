@@ -899,19 +899,8 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _error = 'Playback failed: ' + e.toString());
+      if (mounted) setState(() => _error = 'Playback failed: ${e}');
     }
-  }
-
-  Future<void> _seekTo(int ms) async {
-    if (!_ready) return;
-    await _player.pause();
-    await _player.seek(Duration(milliseconds: ms));
-    if (mounted) setState(() {
-      _positionMs = ms;
-      _playing = false;
-      _previewingSelection = false;
-    });
   }
 
   Future<void> _save() async {
@@ -938,7 +927,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width - 64;
     return AlertDialog(
-      title: Text('Edit ' + widget.title),
+      title: Text('Edit ${widget.title}'),
       content: SizedBox(
         width: 520,
         child: SingleChildScrollView(
@@ -1009,8 +998,8 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('IN  ' + _time(_startMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
-                        Text('OUT  ' + _time(_endMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                        Text('IN  ${_time(_startMs)}', style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                        Text('OUT  ${_time(_endMs)}', style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
                       ],
                     ),
                     const SizedBox(height: 10),
@@ -1023,7 +1012,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
                           tooltip: _playing ? 'Pause' : 'Play selection',
                         ),
                         const SizedBox(width: 8),
-                        Text(_time(_positionMs) + ' / ' + _time(_durationMs),
+                        Text('${_time(_positionMs)} / ${_time(_durationMs)}',
                           style: const TextStyle(color: Colors.white70)),
                       ],
                     ),
