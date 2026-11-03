@@ -280,29 +280,6 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     ));
   }
 
-  Future<void> _shareTake(AudioTake take) async {
-    if (!await File(take.path).exists()) return;
-    await SharePlus.instance.share(ShareParams(title: take.name, files: [XFile(take.path)]));
-  }
-
-  Future<void> _saveTakeToLocation(AudioTake take) async {
-    try {
-      final file = File(take.path);
-      if (!await file.exists()) return;
-      final bytes = await file.readAsBytes();
-      final saved = await FilePicker.saveFile(
-        dialogTitle: 'Save audio take',
-        fileName: take.path.split(Platform.pathSeparator).last,
-        bytes: bytes,
-      );
-      if (mounted) setState(() => _status = saved == null
-          ? 'Save cancelled.'
-          : 'Audio take saved to your selected location.');
-    } catch (e) {
-      if (mounted) setState(() => _status = 'Could not save audio: $e');
-    }
-  }
-
   Future<void> _editTake(AudioTake take) async {
     if (_playingPath != null) {
       await _player.stop();
