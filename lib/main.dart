@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -55,6 +56,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   int _lineIndex = 0;
   int _secondsPerLine = 5;
   int _secondsLeft = 5;
+  int _lineElapsedMs = 0;
   bool _running = false;
   bool _recording = false;
   bool _hasStarted = false;
@@ -92,6 +94,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       _lines = parsed;
       _lineIndex = 0;
       _secondsLeft = _secondsPerLine;
+      _lineElapsedMs = 0;
       _running = false;
       _hasStarted = false;
       _status = '${parsed.length} lines loaded.';
@@ -101,22 +104,31 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   void _startTimer() {
     if (_lines.isEmpty) return;
     _lineTimer?.cancel();
-    _lineTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _lineTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted) return;
-      if (_secondsLeft > 1) {
-        setState(() => _secondsLeft--);
-      } else if (_lineIndex < _lines.length - 1) {
-        setState(() {
-          _lineIndex++;
-          _secondsLeft = _secondsPerLine;
-        });
+      final totalMs = _secondsPerLine * 1000;
+      if (_lineElapsedMs + 100 >= totalMs) {
+        if (_lineIndex < _lines.length - 1) {
+          setState(() {
+            _lineIndex++;
+            _lineElapsedMs = 0;
+            _secondsLeft = _secondsPerLine;
+          });
+        } else {
+          _stopTimer();
+          setState(() {
+            _lineElapsedMs = totalMs;
+            _secondsLeft = 0;
+            _running = false;
+            _status = 'Script finished.';
+          });
+          unawaited(_stopRecordingSegment());
+        }
       } else {
-        _stopTimer();
         setState(() {
-          _running = false;
-          _status = 'Script finished.';
+          _lineElapsedMs += 100;
+          _secondsLeft = ((_secondsPerLine * 1000 - _lineElapsedMs) / 1000).ceil();
         });
-        _stopRecordingSegment();
       }
     });
   }
@@ -179,6 +191,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       setState(() {
         _lineIndex = 0;
         _secondsLeft = _secondsPerLine;
+        _lineElapsedMs = 0;
         _hasStarted = true;
       });
     }
@@ -235,12 +248,14 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     setState(() {
       _lineIndex = (_lineIndex + delta).clamp(0, _lines.length - 1);
       _secondsLeft = _secondsPerLine;
+      _lineElapsedMs = 0;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final currentLine = _lines.isEmpty ? 'Your script will appear here' : _lines[_lineIndex];
+    final lineProgress = _lines.isEmpty ? 0.0 : (_lineElapsedMs / (_secondsPerLine * 1000)).clamp(0.0, 1.0);
     return Scaffold(
       appBar: AppBar(
         title: const Text('TeleprompterStudio', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -294,24 +309,91 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
                         style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
                     Text('$_secondsLeft s', style: const TextStyle(color: Colors.amber, fontSize: 18, fontWeight: FontWeight.bold)),
                   ]),
-                  const SizedBox(height: 22),
-                  SizedBox(
-                    height: 150,
+                  const SizedBox(height: 16),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: 170, maxHeight: 300),
                     child: Center(
-                      child: Text(currentLine,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.white, fontSize: 27, height: 1.35, fontWeight: FontWeight.w600)),
+                      child: SingleChildScrollView(
+                        child: AutoSizeText(
+                          currentLine,
+                          textAlign: TextAlign.center,
+                          minFontSize: 15,
+                          maxFontSize: 30,
+                          stepGranularity: 1,
+                          maxLines: 14,
+                          overflow: TextOverflow.visible,
+                          style: const TextStyle(color: Colors.white, height: 1.3, fontWeight: FontWeight.w600),
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 18),
-                  LinearProgressIndicator(
-                    value: _lines.isEmpty ? 0 : (_lineIndex + 1) / _lines.length,
-                    backgroundColor: Colors.white24,
-                    color: Colors.amber,
+                  const SizedBox(height: 16),
+                  Row(children: [
+                    const Text('THIS LINE', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Text('${(lineProgress * 100).round()}%', style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                  ]),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: LinearProgressIndicator(
+                      minHeight: 9,
+                      value: lineProgress,
+                      backgroundColor: Colors.white24,
+                      color: Colors.amber,
+                    ),
                   ),
+                  const SizedBox(height: 8),
+                  Text('Overall: ${_lines.isEmpty ? 0 : _lineIndex + 1} / ${_lines.length} lines',
+                      style: const TextStyle(color: Colors.white60, fontSize: 12)),
                 ]),
               ),
             ),
+            if (_lines.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      const Expanded(child: Text('Line-by-line timeline', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+                      Text('${_lines.length} lines', style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                    ]),
+                    const SizedBox(height: 8),
+                    ..._lines.asMap().entries.map((entry) {
+                      final i = entry.key;
+                      final progress = i < _lineIndex ? 1.0 : (i == _lineIndex ? lineProgress : 0.0);
+                      return InkWell(
+                        onTap: _running ? null : () => setState(() {
+                          _lineIndex = i;
+                          _lineElapsedMs = 0;
+                          _secondsLeft = _secondsPerLine;
+                        }),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 7),
+                          child: Row(children: [
+                            SizedBox(width: 28, child: Text('${i + 1}.', style: TextStyle(
+                              fontWeight: i == _lineIndex ? FontWeight.bold : FontWeight.normal,
+                              color: i == _lineIndex ? const Color(0xFFB71C1C) : Colors.black54))),
+                            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(entry.value, maxLines: 2, overflow: TextOverflow.ellipsis,
+                                style: TextStyle(fontWeight: i == _lineIndex ? FontWeight.bold : FontWeight.normal)),
+                              const SizedBox(height: 4),
+                              ClipRRect(borderRadius: BorderRadius.circular(5), child: LinearProgressIndicator(
+                                minHeight: 5, value: progress, backgroundColor: Colors.black12,
+                                color: i == _lineIndex ? const Color(0xFFB71C1C) : Colors.green)),
+                            ])),
+                            const SizedBox(width: 8),
+                            Text(i < _lineIndex ? 'Done' : '${_secondsPerLine}s',
+                              style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                          ]),
+                        ),
+                      );
+                    }),
+                  ]),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
               OutlinedButton.icon(onPressed: _running ? null : () => _moveLine(-1), icon: const Icon(Icons.skip_previous), label: const Text('Previous')),
@@ -365,7 +447,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
               child: Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Current starter version: audio-only recording (camera is never opened), timed script, pause/resume, and separate audio takes. Takes are saved as M4A. MP3 merging/export, waveform-based trimming, and optional video recording are the next development steps.',
+                  'Audio-only recording is active; the camera is never opened. Script lines now auto-fit the prompter area and each line has its own live progress seeker. Recordings are saved as separate M4A takes. MP3 merging/export, waveform trimming, and video recording are not included yet.',
                   style: TextStyle(height: 1.4),
                 ),
               ),
