@@ -303,8 +303,13 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   }
 
   Future<void> _editTake(AudioTake take) async {
+    if (_playingPath != null) {
+      await _player.stop();
+      if (mounted) setState(() => _playingPath = null);
+    }
     final edit = await showDialog<_AudioEditCommand>(
       context: context,
+      barrierDismissible: false,
       builder: (_) => _AudioEditorDialog(path: take.path, title: take.name),
     );
     if (edit == null) return;
@@ -327,31 +332,34 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       outputs.add(output);
     }
     try {
-      setState(() => _status = 'Applying audio edit…');
-      final point = edit.playheadMs.clamp(1, durationMs - 1);
-      switch (edit.action) {
-        case 'trim_left':
-          await makeClip(point, durationMs, 'trim_left');
-          break;
-        case 'trim_right':
-          await makeClip(0, point, 'trim_right');
-          break;
-        case 'split':
-          await makeClip(0, point, 'split_1');
-          await makeClip(point, durationMs, 'split_2');
-          break;
-      }
-      if (outputs.isEmpty) throw Exception('The selected edit produced no audio.');
-      if (!mounted) return;
-      setState(() {
-        for (final path in outputs) {
-          _takes.add(AudioTake(path: path, createdAt: DateTime.now()));
+      setState(() => _status = 'Saving audio edit…');
+      final point = edit.playheadMs.clamp(1, durationMs - 1).toInt();
+      if (edit.action == 'split') {
+        await makeClip(0, point, 'part_1');
+        await makeClip(point, durationMs, 'part_2');
+        if (outputs.length != 2) throw Exception('Could not create both split parts.');
+        setState(() {
+          _takes.add(AudioTake(path: outputs[0], createdAt: DateTime.now()));
+          _takes.add(AudioTake(path: outputs[1], createdAt: DateTime.now()));
+          _status = 'Take split into two parts. Both parts added below.';
+        });
+      } else {
+        if (edit.action == 'trim_left') {
+          await makeClip(point, durationMs, 'trimmed');
+        } else {
+          await makeClip(0, point, 'trimmed');
         }
-        _status = edit.action == 'split'
-            ? 'Audio split into two new takes. Original is kept.'
-            : 'Edited audio saved as a new take. Original is kept.';
-      });
+        if (outputs.isEmpty) throw Exception('The selected edit produced no audio.');
+        final editedBytes = await File(outputs.first).readAsBytes();
+        await File(source).writeAsBytes(editedBytes, flush: true);
+        await File(outputs.first).delete();
+        if (mounted) setState(() => _status = 'Edit saved to the same take. No extra take was created.');
+      }
     } catch (e) {
+      for (final path in outputs) {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      }
       if (mounted) setState(() => _status = 'Audio edit failed: $e');
     }
   }
@@ -738,61 +746,69 @@ class _AudioEditorDialog extends StatefulWidget {
 }
 
 class _AudioEditorDialogState extends State<_AudioEditorDialog> {
-  late final wave.PlayerController _controller;
-  StreamSubscription<int>? _durationSub;
-  StreamSubscription<wave.PlayerState>? _stateSub;
+  late final AudioPlayer _previewPlayer;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
+  StreamSubscription<void>? _completeSub;
   int _durationMs = 0;
-  int _playheadMs = 0;
+  int _markerMs = 0;
+  int _previewEndMs = 0;
+  String _mode = 'trim_left';
   bool _ready = false;
   bool _playing = false;
+  bool _previewingEdit = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _controller = wave.PlayerController();
-    _durationSub = _controller.onCurrentDurationChanged.listen((v) {
-      if (mounted) setState(() => _playheadMs = v);
+    _previewPlayer = AudioPlayer();
+    _positionSub = _previewPlayer.onPositionChanged.listen((position) {
+      if (!mounted) return;
+      final ms = position.inMilliseconds.clamp(0, _durationMs).toInt();
+      if (_previewingEdit && ms >= _previewEndMs) {
+        _previewPlayer.pause();
+        setState(() {
+          _markerMs = _previewEndMs;
+          _playing = false;
+          _previewingEdit = false;
+        });
+      } else {
+        setState(() => _markerMs = ms);
+      }
     });
-    _stateSub = _controller.onPlayerStateChanged.listen((v) {
-      if (mounted) setState(() => _playing = v.isPlaying);
+    _durationSub = _previewPlayer.onDurationChanged.listen((duration) {
+      if (mounted && _durationMs == 0) {
+        setState(() {
+          _durationMs = duration.inMilliseconds;
+          _ready = _durationMs > 1;
+        });
+      }
+    });
+    _completeSub = _previewPlayer.onPlayerComplete.listen((_) {
+      if (mounted) setState(() {
+        _playing = false;
+        _previewingEdit = false;
+      });
     });
     _prepare();
   }
 
   Future<void> _prepare() async {
     try {
-      await _controller.preparePlayer(path: widget.path, shouldExtractWaveform: true, noOfSamples: 180);
+      await _previewPlayer.setSource(DeviceFileSource(widget.path));
+      final duration = await _previewPlayer.getDuration();
       if (!mounted) return;
+      final ms = duration?.inMilliseconds ?? 0;
       setState(() {
-        _durationMs = _controller.maxDuration > 0 ? _controller.maxDuration : 1;
-        _playheadMs = 0;
-        _ready = true;
+        _durationMs = ms;
+        _markerMs = 0;
+        _ready = ms > 1;
+        _error = _ready ? null : 'Could not read this audio duration.';
       });
     } catch (e) {
-      if (mounted) setState(() => _error = 'Waveform could not be loaded: $e');
+      if (mounted) setState(() => _error = 'Could not open audio: $e');
     }
-  }
-
-  Future<void> _togglePlay() async {
-    if (!_ready) return;
-    if (_playing) {
-      await _controller.pausePlayer();
-    } else {
-      if (_playheadMs >= _durationMs) {
-        await _controller.seekTo(0);
-        setState(() => _playheadMs = 0);
-      }
-      await _controller.startPlayer();
-    }
-  }
-
-  void _seekFromWaveform(TapUpDetails details, double width) {
-    if (!_ready || width <= 0) return;
-    final ratio = (details.localPosition.dx / width).clamp(0.0, 1.0);
-    final position = (ratio * _durationMs).round().clamp(0, _durationMs);
-    setState(() => _playheadMs = position);
-    unawaited(_controller.seekTo(position));
   }
 
   String _time(int ms) {
@@ -801,86 +817,193 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
         (seconds % 60).toString().padLeft(2, '0');
   }
 
-  void _returnEdit(String action) {
+  int get _rangeStart => _mode == 'trim_left' ? _markerMs : 0;
+  int get _rangeEnd => _mode == 'trim_right' ? _markerMs : _durationMs;
+
+  Future<void> _preview() async {
+    if (!_ready) return;
+    try {
+      await _previewPlayer.stop();
+      final start = _rangeStart;
+      final end = _rangeEnd;
+      if (end <= start) return;
+      await _previewPlayer.seek(Duration(milliseconds: start));
+      setState(() {
+        _markerMs = start;
+        _previewEndMs = end;
+        _previewingEdit = true;
+        _playing = true;
+      });
+      await _previewPlayer.resume();
+    } catch (e) {
+      if (mounted) setState(() {
+        _playing = false;
+        _previewingEdit = false;
+        _error = 'Preview failed: $e';
+      });
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    if (!_ready) return;
+    if (_playing) {
+      await _previewPlayer.pause();
+      if (mounted) setState(() {
+        _playing = false;
+        _previewingEdit = false;
+      });
+    } else {
+      if (_markerMs >= _durationMs) {
+        await _previewPlayer.seek(Duration.zero);
+        if (mounted) setState(() => _markerMs = 0);
+      }
+      await _previewPlayer.resume();
+      if (mounted) setState(() {
+        _playing = true;
+        _previewingEdit = false;
+      });
+    }
+  }
+
+  Future<void> _seek(int value) async {
+    if (!_ready) return;
+    await _previewPlayer.pause();
+    await _previewPlayer.seek(Duration(milliseconds: value));
+    if (mounted) setState(() {
+      _markerMs = value;
+      _playing = false;
+      _previewingEdit = false;
+    });
+  }
+
+  Future<void> _save() async {
     if (!_ready || _durationMs < 2) return;
-    final point = _playheadMs.clamp(1, _durationMs - 1);
+    if (_mode != 'split' && (_rangeEnd - _rangeStart) < 500) {
+      setState(() => _error = 'Keep at least half a second of audio.');
+      return;
+    }
+    await _previewPlayer.stop();
+    if (!mounted) return;
     Navigator.pop(context, _AudioEditCommand(
-      action: action, playheadMs: point, durationMs: _durationMs));
+      action: _mode,
+      playheadMs: _markerMs.clamp(1, _durationMs - 1).toInt(),
+      durationMs: _durationMs,
+    ));
   }
 
   @override
   void dispose() {
+    _positionSub?.cancel();
     _durationSub?.cancel();
-    _stateSub?.cancel();
-    _controller.dispose();
+    _completeSub?.cancel();
+    _previewPlayer.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final waveWidth = MediaQuery.of(context).size.width * 0.72;
+    final start = _rangeStart;
+    final end = _rangeEnd;
     return AlertDialog(
-      title: Text('Waveform editor — ' + widget.title),
+      title: Text('Edit ' + widget.title),
       content: SizedBox(
         width: 520,
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
-          if (!_ready && _error == null) const Padding(
-            padding: EdgeInsets.all(20), child: CircularProgressIndicator()),
-          if (_ready) ...[
-            Container(
-              height: 120,
-              decoration: BoxDecoration(
-                color: const Color(0xFF171B24), borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: wave.AudioFileWaveforms(
-                size: Size(waveWidth, 100),
-                playerController: _controller,
-                waveformType: wave.WaveformType.fitWidth,
-                enableSeekGesture: true,
-                seekOnTapUp: false,
-                onTapUp: (details) => _seekFromWaveform(details, waveWidth),
-                playerWaveStyle: const wave.PlayerWaveStyle(
-                  fixedWaveColor: Colors.white38,
-                  liveWaveColor: Colors.orangeAccent,
-                  seekLineColor: Colors.amber,
-                  showSeekLine: true,
-                  spacing: 3,
-                  waveThickness: 2,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text('1. Choose what you want to do', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'trim_left', label: Text('Keep after')),
+                  ButtonSegment(value: 'trim_right', label: Text('Keep before')),
+                  ButtonSegment(value: 'split', label: Text('Split')),
+                ],
+                selected: {_mode},
+                onSelectionChanged: _ready ? (value) => setState(() => _mode = value.first) : null,
+              ),
+              const SizedBox(height: 18),
+              const Text('2. Move the marker on the timeline', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: const Color(0xFF171B24), borderRadius: BorderRadius.circular(12)),
+                child: Column(
+                  children: [
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      const Text('AUDIO TIMELINE', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                      Text(_time(_durationMs), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    ]),
+                    const SizedBox(height: 12),
+                    if (_ready)
+                      Slider(
+                        min: 0,
+                        max: _durationMs.toDouble(),
+                        value: _markerMs.clamp(0, _durationMs).toDouble(),
+                        onChanged: (value) => setState(() => _markerMs = value.round()),
+                        onChangeEnd: (value) => _seek(value.round()),
+                        activeColor: Colors.amber,
+                        inactiveColor: Colors.white24,
+                      )
+                    else
+                      const LinearProgressIndicator(),
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      Text(_time(_markerMs), style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                      Text('Total ' + _time(_durationMs), style: const TextStyle(color: Colors.white70)),
+                    ]),
+                    const SizedBox(height: 6),
+                    Container(
+                      height: 8,
+                      decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(8)),
+                      child: Row(children: [
+                        if (start > 0) Expanded(flex: start, child: const SizedBox()),
+                        if (end > start) Expanded(flex: end - start, child: Container(
+                          decoration: BoxDecoration(color: Colors.amber, borderRadius: BorderRadius.circular(8)))),
+                        if (_durationMs > end) Expanded(flex: _durationMs - end, child: const SizedBox()),
+                      ]),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.tonalIcon(
+                      onPressed: _ready ? _togglePlayback : null,
+                      icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                      label: Text(_playing ? 'Pause preview' : 'Play audio'),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text('Playhead: ' + _time(_playheadMs)),
-              Text('Total: ' + _time(_durationMs)),
-              IconButton(onPressed: _togglePlay,
-                icon: Icon(_playing ? Icons.pause_circle : Icons.play_circle), iconSize: 34),
-            ]),
-            const Text('Tap the waveform to place the edit marker. Then choose an edit below.',
-              style: TextStyle(fontSize: 12, color: Colors.black54), textAlign: TextAlign.center),
-            const SizedBox(height: 12),
-            Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 8, children: [
-              FilledButton.tonalIcon(
-                onPressed: _ready && _playheadMs > 0 ? () => _returnEdit('trim_left') : null,
-                icon: const Icon(Icons.first_page), label: const Text('Trim Left')),
-              FilledButton.tonalIcon(
-                onPressed: _ready && _playheadMs < _durationMs ? () => _returnEdit('trim_right') : null,
-                icon: const Icon(Icons.last_page), label: const Text('Trim Right')),
-              FilledButton.icon(
-                onPressed: _ready && _playheadMs > 0 && _playheadMs < _durationMs
-                  ? () => _returnEdit('split') : null,
-                icon: const Icon(Icons.content_cut), label: const Text('Split Here')),
-            ]),
-            const SizedBox(height: 8),
-            const Text(
-              'Trim Left keeps audio after the marker. Trim Right keeps audio before it. Split creates two new takes. Original stays safe.',
-              style: TextStyle(fontSize: 11, color: Colors.black54), textAlign: TextAlign.center),
-          ],
-        ]),
+              const SizedBox(height: 12),
+              Text(
+                _mode == 'trim_left'
+                    ? 'Selected: ' + _time(start) + ' to ' + _time(end) + ' — audio before the marker will be removed.'
+                    : _mode == 'trim_right'
+                        ? 'Selected: ' + _time(start) + ' to ' + _time(end) + ' — audio after the marker will be removed.'
+                        : 'The marker divides this take into two parts.',
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _ready ? _preview : null,
+                icon: const Icon(Icons.hearing),
+                label: const Text('Preview only the edited part'),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+              ],
+              const SizedBox(height: 6),
+              const Text(
+                'Save Edit replaces this same take. It will not create a duplicate. Split is the only option that creates two parts.',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton.icon(onPressed: _ready ? _save : null, icon: const Icon(Icons.save), label: const Text('Save Edit')),
       ],
     );
   }
