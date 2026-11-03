@@ -6,6 +6,7 @@ import 'package:auto_size_text/auto_size_text.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
@@ -51,6 +52,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   final TextEditingController _scriptController = TextEditingController();
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
+  final FlutterTts _tts = FlutterTts();
   final List<AudioTake> _takes = [];
   Timer? _lineTimer;
 
@@ -63,8 +65,17 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   bool _recording = false;
   bool _hasStarted = false;
   bool _exporting = false;
+  bool _speaking = false;
+  bool _showTimeline = false;
   String? _playingPath;
   String _status = 'Paste your script to begin.';
+
+  @override
+  void initState() {
+    super.initState();
+    _tts.awaitSpeakCompletion(true);
+    _tts.setSpeechRate(0.45);
+  }
 
   @override
   void dispose() {
@@ -72,6 +83,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     _scriptController.dispose();
     _recorder.dispose();
     _player.dispose();
+    _tts.stop();
     super.dispose();
   }
 
@@ -176,6 +188,58 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     }
   }
 
+  Future<void> _playScriptWithoutRecording() async {
+    if (_speaking) {
+      await _stopScriptPlayback();
+      return;
+    }
+    if (_running || _recording) {
+      setState(() => _status = 'Pause the recording session before playing the script without recording.');
+      return;
+    }
+    if (_lines.isEmpty) {
+      _loadScript();
+      if (_lines.isEmpty) return;
+    }
+    setState(() {
+      _speaking = true;
+      _lineIndex = 0;
+      _lineElapsedMs = 0;
+      _secondsLeft = _secondsPerLine;
+      _status = 'Playing script aloud — no recording is being made.';
+    });
+    try {
+      for (var i = 0; i < _lines.length; i++) {
+        if (!_speaking || !mounted) break;
+        setState(() {
+          _lineIndex = i;
+          _lineElapsedMs = 0;
+          _secondsLeft = _secondsPerLine;
+        });
+        await _tts.speak(_lines[i]);
+      }
+    } catch (e) {
+      if (mounted) setState(() => _status = 'Could not play script: $e');
+    } finally {
+      if (mounted && _speaking) {
+        setState(() {
+          _speaking = false;
+          _lineElapsedMs = 0;
+          _secondsLeft = _secondsPerLine;
+          _status = 'Script playback finished. No audio was recorded.';
+        });
+      }
+    }
+  }
+
+  Future<void> _stopScriptPlayback() async {
+    setState(() {
+      _speaking = false;
+      _status = 'Script playback stopped.';
+    });
+    await _tts.stop();
+  }
+
   Future<void> _playPause() async {
     if (_lines.isEmpty) {
       _loadScript();
@@ -209,6 +273,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
 
   Future<void> _finish() async {
     _stopTimer();
+    if (_speaking) await _stopScriptPlayback();
     await _stopRecordingSegment();
     setState(() {
       _running = false;
@@ -392,7 +457,12 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
             ),
             if (_lines.isNotEmpty) ...[
               const SizedBox(height: 12),
-              Card(
+              OutlinedButton.icon(
+                onPressed: () => setState(() => _showTimeline = !_showTimeline),
+                icon: Icon(_showTimeline ? Icons.expand_less : Icons.list),
+                label: Text(_showTimeline ? 'Hide line-by-line list' : 'Show line-by-line list'),
+              ),
+              if (_showTimeline) Card(
                 child: Padding(
                   padding: const EdgeInsets.all(14),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -439,9 +509,14 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
             Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
               OutlinedButton.icon(onPressed: _running ? null : () => _moveLine(-1), icon: const Icon(Icons.skip_previous), label: const Text('Previous')),
               FilledButton.icon(
-                onPressed: _playPause,
+                onPressed: _speaking ? null : _playPause,
                 icon: Icon(_running ? Icons.pause : Icons.play_arrow),
                 label: Text(_running ? 'Pause' : (_hasStarted ? 'Resume' : 'Start + Record')),
+              ),
+              OutlinedButton.icon(
+                onPressed: _running ? null : _playScriptWithoutRecording,
+                icon: Icon(_speaking ? Icons.stop : Icons.record_voice_over),
+                label: Text(_speaking ? 'Stop Script Audio' : 'Play Script (No Recording)'),
               ),
               OutlinedButton.icon(onPressed: _running ? null : () => _moveLine(1), icon: const Icon(Icons.skip_next), label: const Text('Next')),
               OutlinedButton.icon(onPressed: _finish, icon: const Icon(Icons.stop), label: const Text('Stop')),
@@ -515,7 +590,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
               child: Padding(
                 padding: EdgeInsets.all(14),
                 child: Text(
-                  'Audio-only recording is active; the camera is never opened. Script lines now auto-fit the prompter area and each line has its own live progress seeker. Recordings are saved as separate M4A takes, and the Merge all takes button exports them together as one MP3. Waveform trimming and video recording are not included yet.',
+                  'Audio-only recording is available; the camera is never opened. Use Play Script (No Recording) to hear the full script aloud through this phone without saving a recording, so another device can record it. The line-by-line list is hidden until you press Show line-by-line list. Recordings are saved as separate M4A takes and can be merged into one MP3. Waveform trimming and video recording are not included yet.',
                   style: TextStyle(height: 1.4),
                 ),
               ),
