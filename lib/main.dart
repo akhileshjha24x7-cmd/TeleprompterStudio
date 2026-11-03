@@ -747,6 +747,7 @@ class _AudioEditorDialog extends StatefulWidget {
 
 class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   late final AudioPlayer _previewPlayer;
+  late final wave.PlayerController _waveController;
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<void>? _completeSub;
@@ -763,6 +764,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   void initState() {
     super.initState();
     _previewPlayer = AudioPlayer();
+    _waveController = wave.PlayerController();
     _positionSub = _previewPlayer.onPositionChanged.listen((position) {
       if (!mounted) return;
       final ms = position.inMilliseconds.clamp(0, _durationMs).toInt();
@@ -797,6 +799,11 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
   Future<void> _prepare() async {
     try {
       await _previewPlayer.setSource(DeviceFileSource(widget.path));
+      try {
+        await _waveController.preparePlayer(path: widget.path, shouldExtractWaveform: true, noOfSamples: 160);
+      } catch (_) {
+        // The timeline slider remains available if waveform extraction fails.
+      }
       final duration = await _previewPlayer.getDuration();
       if (!mounted) return;
       final ms = duration?.inMilliseconds ?? 0;
@@ -897,6 +904,7 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
     _durationSub?.cancel();
     _completeSub?.cancel();
     _previewPlayer.dispose();
+    _waveController.dispose();
     super.dispose();
   }
 
@@ -937,6 +945,24 @@ class _AudioEditorDialogState extends State<_AudioEditorDialog> {
                       Text(_time(_durationMs), style: const TextStyle(color: Colors.white70, fontSize: 12)),
                     ]),
                     const SizedBox(height: 12),
+                    if (_ready)
+                      SizedBox(
+                        height: 76,
+                        width: MediaQuery.of(context).size.width * 0.72,
+                        child: wave.AudioFileWaveforms(
+                          size: Size(MediaQuery.of(context).size.width * 0.72, 76),
+                          playerController: _waveController,
+                          waveformType: wave.WaveformType.fitWidth,
+                          enableSeekGesture: false,
+                          playerWaveStyle: const wave.PlayerWaveStyle(
+                            fixedWaveColor: Colors.white38,
+                            liveWaveColor: Colors.amber,
+                            showSeekLine: false,
+                            spacing: 3,
+                            waveThickness: 2,
+                          ),
+                        ),
+                      ),
                     if (_ready)
                       Slider(
                         min: 0,
