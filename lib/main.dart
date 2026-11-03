@@ -94,11 +94,35 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   }
 
   void _loadScript() {
-    final parsed = _scriptController.text
+    final rawLines = _scriptController.text
         .split(RegExp(r'\r?\n'))
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
+
+    // If the pasted script is a numbered list, treat only numbered lines as
+    // new items. Wrapped/continued lines belong to the previous numbered item.
+    final numberedItem = RegExp(r'^\d{1,3}\s*[.)、:-]\s*\S');
+    final numberedLineCount = rawLines.where((line) => numberedItem.hasMatch(line)).length;
+    final isNumberedList = rawLines.isNotEmpty &&
+        numberedItem.hasMatch(rawLines.first) &&
+        numberedLineCount >= 2;
+
+    final List<String> parsed;
+    if (isNumberedList) {
+      final items = <String>[];
+      for (final line in rawLines) {
+        if (numberedItem.hasMatch(line) || items.isEmpty) {
+          items.add(line);
+        } else {
+          items[items.length - 1] = '${items.last} ${line}';
+        }
+      }
+      parsed = items;
+    } else {
+      parsed = rawLines;
+    }
+
     if (parsed.isEmpty) {
       setState(() => _status = 'Please paste at least one line.');
       return;
