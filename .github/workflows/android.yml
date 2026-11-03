@@ -21,6 +21,27 @@ jobs:
       - name: Generate Android platform files
         run: flutter create . --platforms=android
 
+      - name: Repair and install Android NDK
+        shell: bash
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          NDK_DIR="$ANDROID_HOME/ndk/28.2.13676358"
+          # Remove any incomplete/corrupt download left by an earlier SDK setup.
+          rm -rf "$NDK_DIR" "$ANDROID_HOME/.temp/"*
+          for attempt in 1 2 3; do
+            echo "Installing NDK 28.2.13676358 (attempt $attempt/3)"
+            if yes | "$SDKMANAGER" --install "ndk;28.2.13676358"; then
+              break
+            fi
+            rm -rf "$NDK_DIR" "$ANDROID_HOME/.temp/"*
+            if [ "$attempt" -eq 3 ]; then
+              echo "NDK installation failed after 3 attempts."
+              exit 1
+            fi
+            sleep 10
+          done
+
       - name: Get packages
         run: flutter pub get
 
