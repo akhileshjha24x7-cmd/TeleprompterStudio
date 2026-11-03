@@ -61,6 +61,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
   int _lineElapsedMs = 0;
   bool _running = false;
   bool _recording = false;
+  bool _silentMode = false;
   bool _hasStarted = false;
   bool _exporting = false;
   bool _showTimeline = false;
@@ -105,6 +106,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       _secondsLeft = _secondsPerLine;
       _lineElapsedMs = 0;
       _running = false;
+      _silentMode = false;
       _hasStarted = false;
       _status = '${parsed.length} lines loaded.';
     });
@@ -129,6 +131,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
             _lineElapsedMs = totalMs;
             _secondsLeft = 0;
             _running = false;
+            _silentMode = false;
             _status = 'Script finished.';
           });
           unawaited(_stopRecordingSegment());
@@ -184,6 +187,10 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
 
   Future<void> _toggleSilentPlayback() async {
     if (_running) {
+      if (!_silentMode) {
+        setState(() => _status = 'Stop or pause recording before starting silent playback.');
+        return;
+      }
       _stopTimer();
       setState(() {
         _running = false;
@@ -206,6 +213,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
       _hasStarted = true;
       _running = true;
       _recording = false;
+      _silentMode = true;
       _status = 'Silent playback — text and seeker only. No audio is played or recorded.';
     });
     _startTimer();
@@ -236,6 +244,7 @@ class _TeleprompterPageState extends State<TeleprompterPage> {
     await _startRecordingSegment();
     if (!mounted) return;
     setState(() {
+      _silentMode = false;
       _running = true;
       _status = 'Teleprompter running.';
     });
